@@ -35,9 +35,12 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 @property(nonatomic, retain) FlutterBlueStreamHandler *stateStreamHandler;
 @property(nonatomic, retain) CBCentralManager *centralManager;
 @property(nonatomic) NSMutableDictionary *scannedPeripherals;
+@property(nonatomic) NSMutableDictionary *connectedPeripherals;
+@property(nonatomic) NSMutableDictionary *bondedPeripherals;
 @property(nonatomic) NSMutableArray *servicesThatNeedDiscovered;
 @property(nonatomic) NSMutableArray *characteristicsThatNeedDiscovered;
 @property(nonatomic) LogLevel logLevel;
+@property(nonatomic) NSString *uniqueId;
 @end
 
 @implementation FlutterBluePlugin
@@ -49,6 +52,8 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   FlutterBluePlugin* instance = [[FlutterBluePlugin alloc] init];
   instance.channel = channel;
   instance.scannedPeripherals = [NSMutableDictionary new];
+  instance.connectedPeripherals = [NSMutableDictionary new];
+  instance.bondedPeripherals = [NSMutableDictionary new];
   instance.servicesThatNeedDiscovered = [NSMutableArray new];
   instance.characteristicsThatNeedDiscovered = [NSMutableArray new];
   instance.logLevel = emergency;
@@ -61,16 +66,30 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   [registrar addMethodCallDelegate:instance channel:channel];
 }
 
-- (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
-  if (self.centralManager == nil) {
-    self.centralManager = [[CBCentralManager alloc] initWithDelegate:self queue:nil];
+- (CBCentralManager*)centralManager{
+  if (!_centralManager) {
+    NSMutableDictionary<NSString *,id> *options = [NSMutableDictionary new];
+    [options setObject: @(YES) forKey: CBCentralManagerOptionShowPowerAlertKey];
+    if (_uniqueId) [options setObject: _uniqueId forKey: CBCentralManagerOptionRestoreIdentifierKey];
+    _centralManager = [[CBCentralManager alloc] initWithDelegate:self queue:dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0) options:options];
   }
+  return _centralManager;
+}
+
+- (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
   if ([@"setLogLevel" isEqualToString:call.method]) {
     NSNumber *logLevelIndex = [call arguments];
     _logLevel = (LogLevel)[logLevelIndex integerValue];
     result(nil);
+  } else if([@"setUniqueId" isEqualToString:call.method]) {
+    _uniqueId = [call arguments];
+    if (!_centralManager){
+      result(@(YES));
+    } else {
+      result(@(NO));
+    }
   } else if ([@"state" isEqualToString:call.method]) {
-    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self->_centralManager.state]];
+    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self.centralManager.state]];
     result(data);
   } else if([@"isAvailable" isEqualToString:call.method]) {
     if(self.centralManager.state != CBManagerStateUnsupported && self.centralManager.state != CBManagerStateUnknown) {
@@ -100,15 +119,30 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
     if (request.allowDuplicates) {
         [scanOpts setObject:[NSNumber numberWithBool:YES] forKey:CBCentralManagerScanOptionAllowDuplicatesKey];
     }
-    [self->_centralManager scanForPeripheralsWithServices:uuids options:scanOpts];
+    [self.centralManager scanForPeripheralsWithServices:uuids options:scanOpts];
     result(nil);
   } else if([@"stopScan" isEqualToString:call.method]) {
-    [self->_centralManager stopScan];
+    [self.centralManager stopScan];
     result(nil);
   } else if([@"getConnectedDevices" isEqualToString:call.method]) {
+    NSString *serviceUUID = [call arguments];
     // Cannot pass blank UUID list for security reasons. Assume all devices have the Generic Access service 0x1800
-    NSArray *periphs = [self->_centralManager retrieveConnectedPeripheralsWithServices:@[[CBUUID UUIDWithString:@"1800"]]];
+    NSArray *periphs = [self.centralManager retrieveConnectedPeripheralsWithServices:@[[CBUUID UUIDWithString:serviceUUID]]];
+    for (CBPeripheral *peripheral in periphs) {
+      [self.connectedPeripherals setObject:peripheral
+                                  forKey:[[peripheral identifier] UUIDString]];
+    }
     NSLog(@"getConnectedDevices periphs size: %lu", [periphs count]);
+    result([self toFlutterData:[self toConnectedDeviceResponseProto:periphs]]);
+  } else if([@"getBondedDevices" isEqualToString:call.method]) {
+    NSString *deviceUUID = [call arguments];
+    // Cannot pass blank UUID list for security reasons. Assume all devices have the Generic Access service 0x1800
+    NSArray *periphs = [self.centralManager retrievePeripheralsWithIdentifiers:@[[[NSUUID alloc] initWithUUIDString:deviceUUID]]];
+    for (CBPeripheral *peripheral in periphs) {
+      [self.bondedPeripherals setObject:peripheral
+                                  forKey:[[peripheral identifier] UUIDString]];
+    }
+    NSLog(@"getBondedDevices periphs size: %lu", [periphs count]);
     result([self toFlutterData:[self toConnectedDeviceResponseProto:periphs]]);
   } else if([@"connect" isEqualToString:call.method]) {
     FlutterStandardTypedData *data = [call arguments];
@@ -117,12 +151,18 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
     @try {
       CBPeripheral *peripheral = [_scannedPeripherals objectForKey:remoteId];
       if(peripheral == nil) {
-        @throw [FlutterError errorWithCode:@"connect"
-                                   message:@"Peripheral not found"
-                                   details:nil];
+        peripheral = [_connectedPeripherals objectForKey:remoteId];
+        if(peripheral == nil) {
+          peripheral = [_bondedPeripherals objectForKey:remoteId];
+          if(peripheral == nil) {
+            @throw [FlutterError errorWithCode:@"connect"
+                                       message:@"Peripheral not found"
+                                       details:nil];
+          }
+        }
       }
       // TODO: Implement Connect options (#36)
-      [_centralManager connectPeripheral:peripheral options:nil];
+      [self.centralManager connectPeripheral:peripheral options:nil];
       result(nil);
     } @catch(FlutterError *e) {
       result(e);
@@ -131,7 +171,7 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
     NSString *remoteId = [call arguments];
     @try {
       CBPeripheral *peripheral = [self findPeripheral:remoteId];
-      [_centralManager cancelPeripheralConnection:peripheral];
+      [self.centralManager cancelPeripheralConnection:peripheral];
       result(nil);
     } @catch(FlutterError *e) {
       result(e);
@@ -261,7 +301,7 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 }
 
 - (CBPeripheral*)findPeripheral:(NSString*)remoteId {
-  NSArray<CBPeripheral*> *peripherals = [_centralManager retrievePeripheralsWithIdentifiers:@[[[NSUUID alloc] initWithUUIDString:remoteId]]];
+  NSArray<CBPeripheral*> *peripherals = [self.centralManager retrievePeripheralsWithIdentifiers:@[[[NSUUID alloc] initWithUUIDString:remoteId]]];
   CBPeripheral *peripheral;
   for(CBPeripheral *p in peripherals) {
     if([[p.identifier UUIDString] isEqualToString:remoteId]) {
@@ -364,16 +404,31 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 //
 - (void)centralManagerDidUpdateState:(nonnull CBCentralManager *)central {
   if(_stateStreamHandler.sink != nil) {
-    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self->_centralManager.state]];
-    self.stateStreamHandler.sink(data);
+    FlutterStandardTypedData *data = [self toFlutterData:[self toBluetoothStateProto:self.centralManager.state]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      self.stateStreamHandler.sink(data);
+    });
   }
+}
+
+- (void)centralManager:(CBCentralManager *)central willRestoreState:(NSDictionary<NSString *, id> *)dict {
+    NSArray<CBPeripheral*> *peripherals = 
+      [dict objectForKey: CBCentralManagerRestoredStatePeripheralsKey] ? 
+      [dict objectForKey: CBCentralManagerRestoredStatePeripheralsKey] : [NSArray new];
+
+    ProtosConnectedDevicesResponse *result = [self toConnectedDeviceResponseProto:peripherals];
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [_channel invokeMethod:@"WillRestore" arguments:[self toFlutterData:result]];
+    });
 }
 
 - (void)centralManager:(CBCentralManager *)central didDiscoverPeripheral:(CBPeripheral *)peripheral advertisementData:(NSDictionary<NSString *,id> *)advertisementData RSSI:(NSNumber *)RSSI {
   [self.scannedPeripherals setObject:peripheral
                               forKey:[[peripheral identifier] UUIDString]];
   ProtosScanResult *result = [self toScanResultProto:peripheral advertisementData:advertisementData RSSI:RSSI];
-  [_channel invokeMethod:@"ScanResult" arguments:[self toFlutterData:result]];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [_channel invokeMethod:@"ScanResult" arguments:[self toFlutterData:result]];
+  });
 }
 
 - (void)centralManager:(CBCentralManager *)central didConnectPeripheral:(CBPeripheral *)peripheral {
@@ -381,21 +436,25 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   // Register self as delegate for peripheral
   peripheral.delegate = self;
   
-  // Send initial mtu size
-  uint32_t mtu = [self getMtu:peripheral];
-  [_channel invokeMethod:@"MtuSize" arguments:[self toFlutterData:[self toMtuSizeResponseProto:peripheral mtu:mtu]]];
-  
-  // Send connection state
-  [_channel invokeMethod:@"DeviceState" arguments:[self toFlutterData:[self toDeviceStateProto:peripheral state:peripheral.state]]];
+  dispatch_async(dispatch_get_main_queue(), ^{
+    // Send initial mtu size
+    uint32_t mtu = [self getMtu:peripheral];
+    [_channel invokeMethod:@"MtuSize" arguments:[self toFlutterData:[self toMtuSizeResponseProto:peripheral mtu:mtu]]];
+    
+    // Send connection state
+    [_channel invokeMethod:@"DeviceState" arguments:[self toFlutterData:[self toDeviceStateProto:peripheral state:peripheral.state]]];
+  });
 }
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
   NSLog(@"didDisconnectPeripheral");
   // Unregister self as delegate for peripheral, not working #42
   peripheral.delegate = nil;
-  
-  // Send connection state
-  [_channel invokeMethod:@"DeviceState" arguments:[self toFlutterData:[self toDeviceStateProto:peripheral state:peripheral.state]]];
+
+  dispatch_async(dispatch_get_main_queue(), ^{  
+    // Send connection state
+    [_channel invokeMethod:@"DeviceState" arguments:[self toFlutterData:[self toDeviceStateProto:peripheral state:peripheral.state]]];
+  });
 }
 
 - (void)centralManager:(CBCentralManager *)central didFailToConnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {

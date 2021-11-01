@@ -18,7 +18,8 @@ class FlutterBlue {
       _methodStreamController.add(call);
     });
 
-    _setLogLevelIfAvailable();
+    // Send the log level to the underlying platforms.
+    setLogLevel(logLevel);
   }
 
   static FlutterBlue _instance = new FlutterBlue._();
@@ -44,6 +45,7 @@ class FlutterBlue {
   Stream<bool> get isScanning => _isScanning.stream;
 
   BehaviorSubject<List<ScanResult>> _scanResults = BehaviorSubject.seeded([]);
+  BehaviorSubject<List<BluetoothDevice>> _restoringDevices = BehaviorSubject.seeded([]);
 
   /// Returns a stream that is a list of [ScanResult] results while a scan is in progress.
   ///
@@ -53,8 +55,10 @@ class FlutterBlue {
   /// One use for [scanResults] is as the stream in a StreamBuilder to display the
   /// results of a scan in real time while the scan is in progress.
   Stream<List<ScanResult>> get scanResults => _scanResults.stream;
+  Stream<List<BluetoothDevice>> get restoringDevices => _restoringDevices.stream;
 
   PublishSubject _stopScanPill = new PublishSubject();
+  PublishSubject _stopWatchingForRestoringDevicesPill = new PublishSubject();
 
   /// Gets the current state of the Bluetooth module
   Stream<BluetoothState> get state async* {
@@ -69,20 +73,46 @@ class FlutterBlue {
         .map((s) => BluetoothState.values[s.state.value]);
   }
 
-  /// Retrieve a list of connected devices
-  Future<List<BluetoothDevice>> get connectedDevices {
+  /// Retrieve a list of connected devices with specific serviceUUID
+  Future<List<BluetoothDevice>> connectedDevices(String serviceUUID) {
     return _channel
-        .invokeMethod('getConnectedDevices')
+        .invokeMethod('getConnectedDevices', serviceUUID.toString())
         .then((buffer) => protos.ConnectedDevicesResponse.fromBuffer(buffer))
         .then((p) => p.devices)
         .then((p) => p.map((d) => BluetoothDevice.fromProto(d)).toList());
   }
 
-  _setLogLevelIfAvailable() async {
-    if (await isAvailable) {
-      // Send the log level to the underlying platforms.
-      setLogLevel(logLevel);
-    }
+  /// Retrieve a list of bonded devices with specific deviceUUID
+  Future<List<BluetoothDevice>> bondedDevices(String deviceUUID) {
+    return _channel
+        .invokeMethod('getBondedDevices', deviceUUID.toString())
+        .then((buffer) => protos.ConnectedDevicesResponse.fromBuffer(buffer))
+        .then((p) => p.devices)
+        .then((p) => p.map((d) => BluetoothDevice.fromProto(d)).toList());
+  }
+
+  /// Sets a unique id (required on iOS for restoring app on background-scan).
+  /// Must be called before any other methods.
+  Future setUniqueId(String uniqueid) => _channel.invokeMethod('setUniqueId',uniqueid.toString());
+
+  Stream<List<BluetoothDevice>> watchForRestoringDevices() async* {
+    yield* FlutterBlue.instance._methodStream
+        .where((m) => m.method == "WillRestore")
+        .map((m) => m.arguments)
+        .takeUntil(_stopWatchingForRestoringDevicesPill)
+        .doOnDone(stopWatchingForRestoringDevices)
+        .map((buffer) => protos.ConnectedDevicesResponse.fromBuffer(buffer))
+        .map((responseProto) => responseProto.devices)
+        .map((deviceProtos) => deviceProtos.map((p) => BluetoothDevice.fromProto(p)).toList())
+        .map((devices) {
+            _restoringDevices.add(devices);
+            return devices;
+    });
+  }
+
+  /// Stops a scan for Bluetooth Low Energy devices
+  Future stopWatchingForRestoringDevices() async {
+    _stopWatchingForRestoringDevicesPill.add(null);
   }
 
   /// Starts a scan for Bluetooth Low Energy devices and returns a stream

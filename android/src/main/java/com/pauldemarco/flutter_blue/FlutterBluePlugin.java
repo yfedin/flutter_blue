@@ -39,6 +39,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import androidx.core.app.ActivityCompat;
@@ -196,6 +197,12 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                 break;
             }
 
+            case "setUniqueId":
+            {
+                result.success(null);
+                break;
+            }
+            
             case "state":
             {
                 Protos.BluetoothState.Builder p = Protos.BluetoothState.newBuilder();
@@ -269,7 +276,24 @@ public class FlutterBluePlugin implements FlutterPlugin, ActivityAware, MethodCa
                     p.addDevices(ProtoMaker.from(d));
                 }
                 result.success(p.build().toByteArray());
-                log(LogLevel.EMERGENCY, "mDevices size: " + mDevices.size());
+                log(LogLevel.EMERGENCY, "mConnectedDevices size: " + devices.size());
+                break;
+            }
+
+            case "getBondedDevices":
+            {
+                String remoteId = (String)call.arguments;
+                Set<BluetoothDevice> devices = mBluetoothAdapter.getBondedDevices();
+                Protos.ConnectedDevicesResponse.Builder p = Protos.ConnectedDevicesResponse.newBuilder();
+                int matchingDevicesCount = 0;
+                for(BluetoothDevice d : devices) {
+                    if (remoteId.equals(d.getAddress())) {
+                        matchingDevicesCount += 1;
+                        p.addDevices(ProtoMaker.from(d));
+                    }
+                }
+                result.success(p.build().toByteArray());
+                log(LogLevel.EMERGENCY, "mBondedDevices size: " + matchingDevicesCount);
                 break;
             }
 
