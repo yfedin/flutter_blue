@@ -11,9 +11,12 @@ class FlutterBlue {
       new StreamController.broadcast(); // ignore: close_sinks
   Stream<MethodCall> get _methodStream => _methodStreamController
       .stream; // Used internally to dispatch methods from platform.
+  StreamSubscription<List<BluetoothDevice>>? _restoringDevicesSubscription;
 
   /// Singleton boilerplate
   FlutterBlue._() {
+    _restoringDevicesSubscription = _listenForRestoringDevices();
+
     _channel.setMethodCallHandler((MethodCall call) async {
       _methodStreamController.add(call);
     });
@@ -22,11 +25,17 @@ class FlutterBlue {
     setLogLevel(logLevel);
   }
 
+  dispose() {
+    _restoringDevicesSubscription?.cancel();
+    _methodStreamController.close();
+  }
+
   static FlutterBlue _instance = new FlutterBlue._();
   static FlutterBlue get instance => _instance;
 
   /// Creates a fresh instance of FlutterBlue
   static reset() {
+    _instance.dispose();
     _instance = new FlutterBlue._();
   }
 
@@ -95,24 +104,16 @@ class FlutterBlue {
   /// Must be called before any other methods.
   Future setUniqueId(String uniqueid) => _channel.invokeMethod('setUniqueId',uniqueid.toString());
 
-  Stream<List<BluetoothDevice>> watchForRestoringDevices() async* {
-    yield* FlutterBlue.instance._methodStream
+  StreamSubscription<List<BluetoothDevice>> _listenForRestoringDevices() {
+    return _methodStream
         .where((m) => m.method == "WillRestore")
         .map((m) => m.arguments)
-        .takeUntil(_stopWatchingForRestoringDevicesPill)
-        .doOnDone(stopWatchingForRestoringDevices)
         .map((buffer) => protos.ConnectedDevicesResponse.fromBuffer(buffer))
         .map((responseProto) => responseProto.devices)
         .map((deviceProtos) => deviceProtos.map((p) => BluetoothDevice.fromProto(p)).toList())
-        .map((devices) {
+        .listen((devices) {
             _restoringDevices.add(devices);
-            return devices;
-    });
-  }
-
-  /// Stops a scan for Bluetooth Low Energy devices
-  Future stopWatchingForRestoringDevices() async {
-    _stopWatchingForRestoringDevicesPill.add(null);
+        });
   }
 
   /// Starts a scan for Bluetooth Low Energy devices and returns a stream

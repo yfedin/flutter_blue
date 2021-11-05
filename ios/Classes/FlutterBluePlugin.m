@@ -34,6 +34,7 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
 @property(nonatomic, retain) FlutterMethodChannel *channel;
 @property(nonatomic, retain) FlutterBlueStreamHandler *stateStreamHandler;
 @property(nonatomic, retain) CBCentralManager *centralManager;
+@property(nonatomic) NSMutableDictionary *restoringPeripherals;
 @property(nonatomic) NSMutableDictionary *scannedPeripherals;
 @property(nonatomic) NSMutableDictionary *connectedPeripherals;
 @property(nonatomic) NSMutableDictionary *bondedPeripherals;
@@ -51,6 +52,7 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   FlutterEventChannel* stateChannel = [FlutterEventChannel eventChannelWithName:NAMESPACE @"/state" binaryMessenger:[registrar messenger]];
   FlutterBluePlugin* instance = [[FlutterBluePlugin alloc] init];
   instance.channel = channel;
+  instance.restoringPeripherals = [NSMutableDictionary new];
   instance.scannedPeripherals = [NSMutableDictionary new];
   instance.connectedPeripherals = [NSMutableDictionary new];
   instance.bondedPeripherals = [NSMutableDictionary new];
@@ -71,6 +73,7 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
     NSMutableDictionary<NSString *,id> *options = [NSMutableDictionary new];
     [options setObject: @(YES) forKey: CBCentralManagerOptionShowPowerAlertKey];
     if (_uniqueId) [options setObject: _uniqueId forKey: CBCentralManagerOptionRestoreIdentifierKey];
+    NSLog(@"[FlutterBlue] Initiating CBCentralManager with following options: %@", options);
     _centralManager = [[CBCentralManager alloc] initWithDelegate:self queue:dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0) options:options];
   }
   return _centralManager;
@@ -84,8 +87,10 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   } else if([@"setUniqueId" isEqualToString:call.method]) {
     _uniqueId = [call arguments];
     if (!_centralManager){
+      NSLog(@"[FlutterBlue] setUniqueId: %@ -- ON TIME !!!", _uniqueId);
       result(@(YES));
     } else {
+      NSLog(@"[FlutterBlue] setUniqueId: %@ -- TOO LATE :(((", _uniqueId);
       result(@(NO));
     }
   } else if ([@"state" isEqualToString:call.method]) {
@@ -124,6 +129,11 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
   } else if([@"stopScan" isEqualToString:call.method]) {
     [self.centralManager stopScan];
     result(nil);
+  } else if([@"getRestoringDevices" isEqualToString:call.method]) {
+    // Cannot pass blank UUID list for security reasons. Assume all devices have the Generic Access service 0x1800
+    NSArray *peripherals = [self.restoringPeripherals allValues];
+    NSLog(@"getRestoringDevices periphs size: %lu", [peripherals count]);
+    result([self toFlutterData:[self toConnectedDeviceResponseProto:peripherals]]);
   } else if([@"getConnectedDevices" isEqualToString:call.method]) {
     NSString *serviceUUID = [call arguments];
     // Cannot pass blank UUID list for security reasons. Assume all devices have the Generic Access service 0x1800
@@ -415,6 +425,14 @@ typedef NS_ENUM(NSUInteger, LogLevel) {
     NSArray<CBPeripheral*> *peripherals = 
       [dict objectForKey: CBCentralManagerRestoredStatePeripheralsKey] ? 
       [dict objectForKey: CBCentralManagerRestoredStatePeripheralsKey] : [NSArray new];
+
+    [self.restoringPeripherals removeAllObjects];
+    for (CBPeripheral *peripheral in peripherals) {
+      [self.restoringPeripherals setObject:peripheral
+                                    forKey:[[peripheral identifier] UUIDString]];
+    }
+
+    NSLog(@"willRestoreState peripherals size: %lu", [peripherals count]);
 
     ProtosConnectedDevicesResponse *result = [self toConnectedDeviceResponseProto:peripherals];
     dispatch_async(dispatch_get_main_queue(), ^{
